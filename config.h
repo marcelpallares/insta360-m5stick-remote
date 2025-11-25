@@ -27,7 +27,7 @@
 #define ICON_WHITE 0xFFFF
 
 // UI constants
-const int numScreens = 6;
+const int numScreens = 7;
 
 // GPIO debounce settings
 const unsigned long debounceDelay = 200; // 200ms debounce

@@ -8,6 +8,8 @@
 
 // UI variables
 int currentScreen = 0;
+int pairingMenuSelection = 0; // 0=Cam1, 1=Cam2, 2=Layout, 3=Back
+extern bool isVerticalLayout;
 
 // GPIO variables
 unsigned long lastPinPress[3] = {0, 0, 0}; // For G0, G26, G36
@@ -15,6 +17,10 @@ unsigned long startupTime = 0;
 
 // External GPIO delay variable (defined in main sketch)
 extern int gpioDelay;
+
+// External recording state (defined in main sketch)
+extern bool isRecording;
+extern unsigned long recordingStartTime;
 
 // Auto-detection and scaling variables
 bool isPlus2 = false;
@@ -46,16 +52,17 @@ void detectDeviceAndSetScale() {
   Serial.print("x");
   Serial.println(screenHeight);
   
-  if (screenWidth == 240 && screenHeight == 135) {
+  // Check dimensions for M5StickC Plus/Plus2 (240x135) in either orientation
+  if ((screenWidth == 240 && screenHeight == 135) || (screenWidth == 135 && screenHeight == 240)) {
     // M5StickC Plus/Plus2
     isPlus2 = true;
     scaleFactor = 1.5;
-    Serial.println("Detected: M5StickC Plus/Plus2 (240x135)");
+    Serial.println("Detected: M5StickC Plus/Plus2");
   } else {
-    // Original M5StickC or similar
+    // Original M5StickC or similar (160x80)
     isPlus2 = false;
     scaleFactor = 1.0;
-    Serial.println("Detected: M5StickC (original) (160x80)");
+    Serial.println("Detected: M5StickC (original)");
   }
   
   // Keep icons at original size but scale text
@@ -64,29 +71,38 @@ void detectDeviceAndSetScale() {
   
   // Set up layout based on device
   if (isPlus2) {
-    // M5StickC Plus/Plus2 layout (240x135)
-    layout.iconX = (240 - baseIconSize) / 2;  // Center 32px icon in 240px width
-    layout.iconY = 30;
-    layout.textX = 240 / 2;  // True center of screen width for text calculation
-    layout.textY = layout.iconY + baseIconSize + 10;
-    layout.statusX = 220;
-    layout.statusY = 12;
-    layout.connectionRadius = 7;
-    layout.dotsY = 120;
-    layout.dotsSpacing = 25;
-    layout.dotsStartX = 45;
-    layout.instructX = 8;
-    layout.instructY = 8;
+    // M5StickC Plus/Plus2 layout
+    if (screenWidth > screenHeight) { // Landscape
+        layout.iconX = (screenWidth - baseIconSize) / 2;
+        layout.iconY = 30;
+        layout.textX = screenWidth / 2;
+        layout.textY = layout.iconY + baseIconSize + 10;
+        layout.statusX = 220;
+        layout.statusY = 12;
+        layout.connectionRadius = 7;
+        layout.dotsY = 120;
+        layout.dotsSpacing = 25;
+        layout.dotsStartX = 45;
+        layout.instructX = 8;
+        layout.instructY = 8;
+    } else { // Portrait
+        // Adapt layout for Portrait if needed for other screens
+        // Currently Dashboard handles its own layout dynamiclly
+        layout.dotsY = screenHeight - 15; 
+        layout.dotsSpacing = 25;
+        layout.dotsStartX = (screenWidth - (25 * 3)) / 2 + 12; // Center dots
+    }
   } else {
-    // Original M5StickC layout (160x80)
-    layout.iconX = (160 - baseIconSize) / 2;  // Center 32px icon in 160px width
+    // Original M5StickC layout
+    // ... (Keep existing logic, simplified for brevity if needed, but let's leave it mostly as is)
+    layout.iconX = (screenWidth - baseIconSize) / 2;
     layout.iconY = 20;
-    layout.textX = 160 / 2;  // True center of screen width for text calculation
+    layout.textX = screenWidth / 2;
     layout.textY = layout.iconY + baseIconSize + 4;
-    layout.statusX = 150;
+    layout.statusX = screenWidth - 10;
     layout.statusY = 8;
     layout.connectionRadius = 5;
-    layout.dotsY = 72;
+    layout.dotsY = screenHeight - 8;
     layout.dotsSpacing = 17;
     layout.dotsStartX = 30;
     layout.instructX = 5;
@@ -95,10 +111,15 @@ void detectDeviceAndSetScale() {
   
   Serial.print("Scale factor: ");
   Serial.print(scaleFactor);
-  Serial.print(", Icon size: ");
-  Serial.print(scaledIconSize);
-  Serial.print(", Text size: ");
-  Serial.println(scaledTextSize);
+}
+
+void applyLayoutRotation() {
+    if (isVerticalLayout) {
+        M5.Lcd.setRotation(0); // Portrait (Button B at bottom)
+    } else {
+        M5.Lcd.setRotation(3); // Landscape (Button B at right)
+    }
+    detectDeviceAndSetScale();
 }
 
 void drawBitmap(int16_t x, int16_t y, const uint8_t *bitmap, int16_t w, int16_t h, uint16_t color) {
@@ -120,17 +141,6 @@ void drawBitmap(int16_t x, int16_t y, const uint8_t *bitmap, int16_t w, int16_t 
   }
 }
 
-void drawConnectionStatus() {
-  // Draw connection status circle in top-right corner
-  if (deviceConnected) {
-    M5.Lcd.fillCircle(layout.statusX, layout.statusY, layout.connectionRadius, GREEN);
-  } else if (pairingMode) {
-    M5.Lcd.fillCircle(layout.statusX, layout.statusY, layout.connectionRadius, YELLOW);
-  } else {
-    M5.Lcd.fillCircle(layout.statusX, layout.statusY, layout.connectionRadius, RED);
-  }
-}
-
 // Helper function to get text width for proper centering
 int getTextWidth(String text, int textSize) {
   // Approximate character width based on text size
@@ -138,83 +148,261 @@ int getTextWidth(String text, int textSize) {
   return text.length() * charWidth;
 }
 
+// Helper to extract short name from full camera name
+String getShortName(const char* fullName) {
+  String name = String(fullName);
+  if (name.length() == 0) return "NO CAM";
+  
+  // Remove "Insta360 " prefix if present
+  if (name.startsWith("Insta360 ")) {
+    name = name.substring(9);
+  }
+  
+  // Find first space to get model name (e.g. "X3" from "X3 1234")
+  int spaceIndex = name.indexOf(' ');
+  if (spaceIndex > 0) {
+    name = name.substring(0, spaceIndex);
+  }
+  
+  return name;
+}
+
+// Draw a colored bar at the bottom with status message
+void showBottomStatus(const char* text, uint16_t color) {
+  int width = M5.Lcd.width();
+  int height = M5.Lcd.height();
+  
+  M5.Lcd.fillRect(0, height - 25, width, 25, color);
+  M5.Lcd.setTextColor(WHITE);
+  M5.Lcd.setTextSize(scaledTextSize);
+  int textWidth = getTextWidth(String(text), scaledTextSize);
+  M5.Lcd.setCursor((width - textWidth) / 2, height - 20);
+  M5.Lcd.print(text);
+}
+
+// Clear screen and show a large centered message
+void showCenteredMessage(const char* line1, const char* line2, uint16_t color) {
+  M5.Lcd.fillScreen(BLACK);
+  int width = M5.Lcd.width();
+  int height = M5.Lcd.height();
+  int centerY = height / 2;
+  
+  M5.Lcd.setTextColor(color);
+  M5.Lcd.setTextSize(scaledTextSize); // Base size
+  
+  // Line 1 (Top, smaller or same?)
+  if (line1 && strlen(line1) > 0) {
+      int w1 = getTextWidth(String(line1), scaledTextSize);
+      M5.Lcd.setCursor((width - w1) / 2, centerY - 20);
+      M5.Lcd.println(line1);
+  }
+  
+  // Line 2 (Center, larger if possible or same)
+  if (line2 && strlen(line2) > 0) {
+      // Make line 2 slightly larger if scale factor allows, else same
+      int size2 = scaledTextSize; // Keep consistent size for readability
+      M5.Lcd.setTextSize(size2);
+      M5.Lcd.setTextColor(WHITE);
+      int w2 = getTextWidth(String(line2), size2);
+      M5.Lcd.setCursor((width - w2) / 2, centerY + 5);
+      M5.Lcd.println(line2);
+  }
+}
+
+void updateDashboardTimer() {
+  if (currentScreen != 0) return;
+  
+  int width = M5.Lcd.width();
+  int height = M5.Lcd.height();
+  
+  // Only redraw the bottom strip
+  if (isRecording) {
+    unsigned long duration = (millis() - recordingStartTime) / 1000;
+    int minutes = duration / 60;
+    int seconds = duration % 60;
+    
+    char timeStr[10];
+    sprintf(timeStr, "%02d:%02d", minutes, seconds);
+    
+    // Redraw background only for the timer area
+    M5.Lcd.fillRect(0, height - 25, width, 25, RED);
+    M5.Lcd.setTextColor(WHITE);
+    M5.Lcd.setTextSize(scaledTextSize);
+    int timeWidth = getTextWidth(String(timeStr), scaledTextSize);
+    M5.Lcd.setCursor((width - timeWidth) / 2, height - 20);
+    M5.Lcd.print(timeStr);
+  } else {
+     // Clear the timer area if we stopped recording but didn't do a full refresh yet
+     // (Though usually a full updateDisplay is called on stop)
+     M5.Lcd.fillRect(0, height - 25, width, 25, BLACK);
+  }
+}
+
+void drawDashboard() {
+  int width = M5.Lcd.width();
+  int height = M5.Lcd.height();
+  int halfWidth = width / 2;
+  
+  // Remote Battery Indicator (Top Right)
+  int batLevel = M5.Power.getBatteryLevel();
+  M5.Lcd.setTextSize(1);
+  if (batLevel > 20) M5.Lcd.setTextColor(GREEN);
+  else M5.Lcd.setTextColor(RED);
+  M5.Lcd.setCursor(width - 25, 5);
+  M5.Lcd.print(batLevel);
+  M5.Lcd.print("%");
+
+  // --- Camera 1 Setup ---
+  uint16_t c1Color = DARKGREY;
+  String c1Name = "EMPTY";
+  if (camera1.isValid) {
+    c1Name = getShortName(camera1.name);
+    if (camera1Connected) c1Color = BLUE;
+    else c1Color = RED;
+  }
+
+  // --- Camera 2 Setup ---
+  uint16_t c2Color = DARKGREY;
+  String c2Name = "EMPTY";
+  if (camera2.isValid) {
+    c2Name = getShortName(camera2.name);
+    if (camera2Connected) c2Color = BLUE;
+    else c2Color = RED;
+  }
+
+  if (!isVerticalLayout) {
+      // --- HORIZONTAL LAYOUT (Side by Side) ---
+      // Draw divider
+      M5.Lcd.drawLine(halfWidth, 10, halfWidth, height - 20, DARKGREY);
+      
+      // Cam 1 (Left)
+      int c1X = halfWidth / 2;
+      int c1Y = height / 2 - 10;
+      M5.Lcd.fillCircle(c1X, c1Y - 15, isPlus2 ? 15 : 10, c1Color);
+      
+      M5.Lcd.setTextSize(scaledTextSize);
+      M5.Lcd.setTextColor(WHITE);
+      int name1Width = getTextWidth(c1Name, scaledTextSize);
+      int text1X = c1X - (name1Width/2);
+      int text1Y = c1Y + 10; // Increased spacing (+5)
+      M5.Lcd.setCursor(text1X, text1Y);
+      M5.Lcd.print(c1Name);
+
+      // Recording Dot 1 (Relative to Text Top-Right)
+      if (camera1Connected && camera1.isRecording) {
+          // Position: Right of text + 6px, Top of text + 2px
+          M5.Lcd.fillCircle(text1X + name1Width + 6, text1Y + 2, 5, RED);
+      }
+      
+      // Cam 2 (Right)
+      int c2X = halfWidth + (halfWidth / 2);
+      int c2Y = height / 2 - 10;
+      M5.Lcd.fillCircle(c2X, c2Y - 15, isPlus2 ? 15 : 10, c2Color);
+      
+      M5.Lcd.setTextSize(scaledTextSize);
+      M5.Lcd.setTextColor(WHITE);
+      int name2Width = getTextWidth(c2Name, scaledTextSize);
+      int text2X = c2X - (name2Width/2);
+      int text2Y = c2Y + 10; // Increased spacing (+5)
+      M5.Lcd.setCursor(text2X, text2Y);
+      M5.Lcd.print(c2Name);
+
+      // Recording Dot 2
+      if (camera2Connected && camera2.isRecording) {
+          M5.Lcd.fillCircle(text2X + name2Width + 6, text2Y + 2, 5, RED);
+      }
+      
+  } else {
+      // --- VERTICAL LAYOUT (Top / Bottom) ---
+      int halfHeight = height / 2;
+      // Draw divider
+      M5.Lcd.drawLine(10, halfHeight, width - 10, halfHeight, DARKGREY);
+      
+      // Cam 1 (Top)
+      int c1X = width / 2;
+      int c1Y = halfHeight / 2; 
+      M5.Lcd.fillCircle(c1X, c1Y - 10, isPlus2 ? 15 : 10, c1Color);
+      
+      M5.Lcd.setTextSize(scaledTextSize);
+      M5.Lcd.setTextColor(WHITE);
+      int name1Width = getTextWidth(c1Name, scaledTextSize);
+      int text1X = c1X - (name1Width/2);
+      int text1Y = c1Y + 15; // Increased spacing (+5 from previous +10)
+      M5.Lcd.setCursor(text1X, text1Y);
+      M5.Lcd.print(c1Name);
+
+      // Recording Dot 1
+      if (camera1Connected && camera1.isRecording) {
+          M5.Lcd.fillCircle(text1X + name1Width + 6, text1Y + 2, 5, RED);
+      }
+      
+      // Cam 2 (Bottom)
+      int c2X = width / 2;
+      int c2Y = halfHeight + (halfHeight / 2) - 10;
+      M5.Lcd.fillCircle(c2X, c2Y - 10, isPlus2 ? 15 : 10, c2Color);
+      
+      M5.Lcd.setTextSize(scaledTextSize);
+      M5.Lcd.setTextColor(WHITE);
+      int name2Width = getTextWidth(c2Name, scaledTextSize);
+      int text2X = c2X - (name2Width/2);
+      int text2Y = c2Y + 15; // Increased spacing (+5)
+      M5.Lcd.setCursor(text2X, text2Y);
+      M5.Lcd.print(c2Name);
+
+      // Recording Dot 2
+      if (camera2Connected && camera2.isRecording) {
+          M5.Lcd.fillCircle(text2X + name2Width + 6, text2Y + 2, 5, RED);
+      }
+  }
+  
+  // --- Recording Status (Bottom) ---
+  if (isRecording) {
+    updateDashboardTimer();
+  }
+}
+
+// External pairing menu selection (defined at top of this file)
+
+void drawPairingMenu() {
+  int width = M5.Lcd.width();
+  int height = M5.Lcd.height();
+  int numItems = 4;
+  int itemHeight = height / numItems;
+  
+  // Force smaller text in Vertical mode to fit width
+  int menuTextSize = (isVerticalLayout) ? 1 : scaledTextSize;
+  
+  String layoutStr = isVerticalLayout ? "LAYOUT: VERT" : "LAYOUT: HORIZ";
+  String items[] = {"PAIR SLOT 1", "PAIR SLOT 2", layoutStr, "BACK"};
+  uint16_t colors[] = {ICON_BLUE, ICON_CYAN, ICON_YELLOW, WHITE};
+  
+  for (int i = 0; i < numItems; i++) {
+    int y = i * itemHeight;
+    
+    // Highlight selection
+    if (i == pairingMenuSelection) {
+      M5.Lcd.fillRect(0, y, width, itemHeight, DARKGREY);
+      M5.Lcd.drawRect(0, y, width, itemHeight, WHITE);
+    }
+    
+    // Draw Text
+    M5.Lcd.setTextColor(colors[i]);
+    M5.Lcd.setTextSize(menuTextSize);
+    int textWidth = getTextWidth(items[i], menuTextSize);
+    M5.Lcd.setCursor((width - textWidth) / 2, y + (itemHeight/2) - 5);
+    M5.Lcd.print(items[i]);
+  }
+}
+
 void updateDisplay() {
   M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setTextSize(scaledTextSize);
   
-  // Draw connection status
-  drawConnectionStatus();
-  
-  // Draw screen indicator dots at bottom
-  for (int i = 0; i < numScreens; i++) {
-    int x = layout.dotsStartX + (i * layout.dotsSpacing);
-    int y = layout.dotsY;
-    int dotRadius = isPlus2 ? 4 : 3;
-    int dotRadiusInactive = isPlus2 ? 3 : 2;
-    
-    if (i == currentScreen) {
-      M5.Lcd.fillCircle(x, y, dotRadius, WHITE);
-    } else {
-      M5.Lcd.drawCircle(x, y, dotRadiusInactive, DARKGREY);
-    }
+  if (currentScreen == 0) {
+    drawDashboard();
+  } else if (currentScreen == 1) {
+    drawPairingMenu();
   }
-  
-  // Draw current screen content with properly centered text
-  String displayText = "";
-  uint16_t iconColor = WHITE;
-  
-  switch (currentScreen) {
-    case 0: // Connect New Camera
-      drawBitmap(layout.iconX, layout.iconY, bluetooth_icon, 32, 32, ICON_BLUE);
-      displayText = "CONNECT";
-      iconColor = ICON_BLUE;
-      break;
-      
-    case 1: // Shutter
-      drawBitmap(layout.iconX, layout.iconY, shutter_icon, 32, 32, ICON_RED);
-      displayText = "SHUTTER";
-      iconColor = ICON_RED;
-      break;
-      
-    case 2: // Switch Mode
-      drawBitmap(layout.iconX, layout.iconY, switch_icon, 32, 32, ICON_ORANGE);
-      displayText = "MODE";
-      iconColor = ICON_ORANGE;
-      break;
-      
-    case 3: // Screen Off
-      drawBitmap(layout.iconX, layout.iconY, screen_icon, 32, 32, ICON_PINK);
-      displayText = "SCREEN";
-      iconColor = ICON_PINK;
-      break;
-      
-    case 4: // Sleep
-      drawBitmap(layout.iconX, layout.iconY, sleep_icon, 32, 32, ICON_PURPLE);
-      displayText = "SLEEP";
-      iconColor = ICON_PURPLE;
-      break;
-      
-    case 5: // Wake
-      drawBitmap(layout.iconX, layout.iconY, wake_icon, 32, 32, ICON_YELLOW);
-      displayText = "WAKE";
-      iconColor = ICON_YELLOW;
-      break;
-  }
-  
-  // Calculate centered text position
-  int textWidth = getTextWidth(displayText, scaledTextSize);
-  int centeredTextX = layout.textX - (textWidth / 2);
-  
-  // Draw the text centered
-  M5.Lcd.setTextColor(WHITE);
-  M5.Lcd.setCursor(centeredTextX, layout.textY);
-  M5.Lcd.print(displayText);
-  
-  // Show instructions hint (small text)
-  M5.Lcd.setTextColor(DARKGREY);
-  M5.Lcd.setTextSize(1); // Always size 1 for instructions
-  M5.Lcd.setCursor(layout.instructX, layout.instructY);
-  M5.Lcd.print("A:Run B:Next");
 }
 
 void showNotConnectedMessage() {
@@ -272,6 +460,14 @@ void checkGPIOPins() {
     Serial.println("ms then executing Shutter");
     delay(gpioDelay);  // Apply unique delay before executing
     executeShutter();
+    // Also toggle timer for GPIO press
+    if (!isRecording) {
+        isRecording = true;
+        recordingStartTime = millis();
+    } else {
+        isRecording = false;
+    }
+    updateDisplay();
   }
   lastShutterState = currentShutterState;
   
